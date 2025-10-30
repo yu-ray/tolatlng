@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="author" content="yanue" />
+  <meta name="copyright" content="yanue.net" />
+  <meta name="keywords"
+    content="经纬度,查询,经纬度查询,经纬度在线查询,经纬度查找地名,经纬度(批量)查询,经纬度转换地名,地名批量查询经纬度,查询地名返回经纬度,根据经纬度批量查询地名,google map经纬度 ,yanue.net" />
+  <meta name="description"
+    content="运用google map api开发的地图系统，实现经纬度(批量)在线查询,地名批量查询经纬度,google 经纬度查询地名,经纬度查找地名,查询地名返回经纬度,根据经纬度批量查询地名,google map运用geocoder.geocode实例" />
+  <title>经纬度在线查询,地名(批量)查询经纬度,经纬度(批量)查询地名</title>
+  <link rel="stylesheet" href="./map.css">
+  <script src="./jquery.last.js" type="text/javascript"></script>
+  <script src="./map.geo.js" type="text/javascript"></script>
+  <script src="https://api.map.baidu.com/api?v=1.0&type=webgl&ak=gM3dDEtGOkfxaIW4rZymiKGGlNimax4d"></script>
+</head>
+
+<body>
+  <div id="main">
+    <div class="top">
+      <div class="box">
+        <span class="right">
+          <a href="https://github.com/yanue" target="_blank" style="color: #10d710;">github</a>
+          |
+          <a href="http://yanue.net/about.html">关于本站</a>
+        </span>
+        <ul class="top-nav">
+          <li><a href="http://yanue.net">首页</a></li>
+        </ul>
+      </div>
+    </div>
+    <div id="header">
+      <div class="box">
+        <div class="nav">
+          <div class="logo"></div>
+          <div class="title">
+            <h1>
+              <span class="left">🌱 半叶寒羽 - 地图作品</span>
+              <span class="right gray">-----雨睐修改-----</span>
+            </h1>
+          </div>
+        </div>
+        <div class="clear"></div>
+      </div>
+    </div>
+    <div id="content">
+      <div class="box">
+        <section class="left-section">
+          <div class="breadcrumbs">
+            <label>你的位置：</label>
+            <a href="https://yanue.net">首页</a>
+            >
+            <a href="https://map.yanue.net/">地图作品</a>
+          </div>
+          <article class="post-detail" id="inner">
+            <header class="post-info">
+              <h1 class='post-title'>经纬度在线查询,地名(批量)查询经纬度,经纬度(批量)查询地名</h1>
+            </header>
+            <main class="post-content">
+              <div class="toplink">
+                <label>地图工具</label>
+                <a href="https://map.yanue.net/toLatLng/">地名查询经纬度(拖动精确定位)</a> |
+                <a href="https://map.yanue.net/">批量地名经纬度查询</a> |
+                <a href="https://map.yanue.net/gps.html">GPS转换谷歌百度经纬度</a>
+                <span class="right">
+                  <a href=''>重新加载地图</a>
+                </span>
+              </div>
+
+              <div id="map-wrap">
+                <div id="inputWrap">
+                  <div id="left">
+                    <h3 class="sub-title">
+                      输入地名 <em><a href="javascript:;" id='clearAddress'>清空输入</a></em>
+                      <span class="right"><button id='toLatLngBtn' class="button">解析地名</button></span>
+                    </h3>
+                    <p class="input-tip">(每个地名一行)</p>
+                    <textarea name="" id="addr" class='textarea'>
+贵州省贵阳市云岩区书香门第B栋3单元
+北京
+遵义</textarea>
+                  </div>
+                  <div id="right">
+                    <div id="toAddressDiv">
+                      <h3 class="sub-title">
+                        输入经纬度 <em> <a href="javascript:;" id='clearLatLng'>清空输入</a></em>
+                        <span class="right"> <button id='toAddressBtn' class="button">解析经纬度</button></span>
+                      </h3>
+                      <p class="input-tip">(每个经纬度换一行，格式：纬度,经度)</p>
+                      <textarea name="" id="latLng" class='textarea'>
+26.57,106.72
+39.904214,116.40741300000002</textarea>
+                    </div>
+                  </div>
+                  <div class="clear"></div>
+                </div>
+                <div class="showWrap">
+                  <div class="showMap">
+                    <h3 class="sub-title">
+                      地图展示<em>(基于百度地图)</em>
+                      <span class="right">
+                        <a href="javascript:;" id="fullscreenBtn" style="font-size: 16px;color:#A52A2A;">全屏模式</a>
+                      </span>
+                    </h3>
+                    <div id="map_canvas"></div>
+                  </div>
+                  <div class="showResult">
+                    <h3 class="sub-title">
+                      解析结果
+                      <span class="red" id="status">等待解析</span>
+                      <span class="right">
+                        <a href="javascript:;" id='clearResult'>清空结果</a> |
+                        <a href="javascript:;" id='exportResult'>导出结果(EXCEL)</a>
+                      </span>
+                    </h3>
+                    <div id="showResults" tabindex="0">等待解析</div>
+                  </div>
+                  <div class="clear"></div>
+                </div>
+                <div class="clear"></div>
+              </div>
+            </main>
+          </article>
+        </section>
+      </div>
+    </div>
+    <div id="footer">
+      <div style="background: rgba(240,210,150,0.1);border-top: 3px solid #e9e0d9;">
+        <div class="box">
+          <div style="line-height: 30px;padding: 8px 0;">
+            <span class="right">
+              粤ICP备14013310号
+            </span>
+            <span>Copyright © 2023 map.yanue.net</span>
+          </div>
+        </div>
+      </div>
+      <script>
+        var _hmt = _hmt || [];
+        (function () {
+          var hm = document.createElement("script");
+          hm.src = "https://hm.baidu.com/hm.js?a37fc5942ae6900185918d0920950509";
+          var s = document.getElementsByTagName("script")[0];
+          s.parentNode.insertBefore(hm, s);
+        })();
+      </script>
+    </div>
+  </div>
+
+
+  <script>
+    window.onerror = function (message, source, lineno, colno, error) {
+      console.log('捕获到异常：', { message, source, lineno, colno, error });
+    }
+  </script>
+</body>
+
+</html>
