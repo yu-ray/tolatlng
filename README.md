@@ -5,4 +5,5 @@
 原作者为：半叶寒雨，原功能只含有百度api搜索，且由于过多访问导致api调用超限，因此已停止服务。
 经洛染雨睐修改后添加功能
 注意，如果调用国外接口需要科学上网，否则会解析超时
-https://github.com/BNDong/coordtransform-php/blob/master/coordtransform.php，参考此代码，添加BD-09坐标系转换为WGS84坐标系功能
+https://github.com/BNDong/coordtransform-php/blob/master/coordtransform.php
+参考此代码，添加BD-09坐标系转换为WGS84坐标系功能
