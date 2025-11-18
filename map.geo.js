@@ -490,15 +490,19 @@ $(function () {
           addMarker(lng, lat, (i + 1) + ": " + addr + poi);
 
           // 输出/导出时：如果位于中国范围，则将 BD09 -> WGS84（否则保持原始坐标）
+          // 国内
           if (Rectangle.isInChina(lng, lat)) {
             var wgs = Coordtransform.bd09ToWgs84(lng, lat); // [lng, lat]
             var wgsLng = wgs[0].toFixed(6);
             var wgsLat = wgs[1].toFixed(6);
-            // 把 WGS84 写进你的 finish/结果中（示例）
-            finish(i, wgsLat, wgsLng, addr + poi, JSON.stringify(rs));
+
+            const text = `${lat6},${lng6}：${addr}${poi}`;
+
+            finish(text, [i, wgsLat, wgsLng, addr + poi, JSON.stringify(rs)]);
           } else {
-            // 国外点：假设已经是 WGS84（OSM），不做转换
-            finish(i, lat.toFixed(6), lng.toFixed(6), addr + poi, JSON.stringify(rs));
+            const text = `${lat6},${lng6}：${addr}${poi}`;
+
+            finish(text, [i, lat6, lng6, addr + poi, JSON.stringify(rs)]);
           }
         } else {
           const text = `${lat6},${lng6}：解析失败`;
