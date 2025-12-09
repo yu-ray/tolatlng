@@ -149,27 +149,257 @@ class Coordtransform {
 
     return ret;
   }
-
-  static _transformLng(lng, lat) {
-    let ret =
-      300.0 + lng + 2.0 * lat +
-      0.1 * lng * lng + 0.1 * lng * lat +
-      0.1 * Math.sqrt(Math.abs(lng));
-
-    ret += (20.0 * Math.sin(6.0 * lng * this.PI) +
-      20.0 * Math.sin(2.0 * lng * this.PI)) * 2.0 / 3.0;
-
-    ret += (20.0 * Math.sin(lng * this.PI) +
-      40.0 * Math.sin(lng / 3.0 * this.PI)) * 2.0 / 3.0;
-
-    ret += (150.0 * Math.sin(lng / 12.0 * this.PI) +
-      300.0 * Math.sin(lng / 30.0 * this.PI)) * 2.0 / 3.0;
-
-    return ret;
-  }
 }
 
-var _markerPoints = [];
+
+let _markerPoints = [];
+const TRANSLATE_CONCURRENCY = 2;
+const TRANSLATE_TIMEOUT_MS = 45000;
+const TRANSLATE_RETRY = 2;
+const TRANSLATE_FALLBACK = true;
+const _translateCache = new Map();
+const _translateQueue = createConcurrencyQueue(TRANSLATE_CONCURRENCY);
+
+
+// 清理 OSM / 翻译请求中的原始文本：去标签、收敛空白、选择中文优先的多语并列项。
+function cleanOsmText(text) {
+  if (!text) return "";
+  if (typeof text !== 'string') text = String(text);
+
+  // 去掉 HTML 标签
+  let s = text.replace(/<[^>]+>/g, '');
+
+  // 多语言并列（例如：韩国 / 南韓）优先保留含汉字的项
+  if (s.includes('/')) {
+    const parts = s.split('/').map(t => t.trim()).filter(Boolean);
+    const cn = parts.find(p => /[\u4e00-\u9fa5]/.test(p));
+    s = cn || parts[0] || s;
+  }
+
+  // 合并多空白为单空格并去首尾空格
+  s = s.replace(/\s+/g, ' ').trim();
+
+  // 移除纯数字邮编（长度 3-6）和常见噪声
+  s = s.replace(/\b\d{3,6}\b/g, '').replace(/\b\d{3}-\d{4}\b/g, '');
+
+  return s;
+}
+
+// 清洗并格式化最终输出文本（不做繁简转换，保持原文）
+async function cleanTranslatedText(text, poi) {
+  if (!text) return "";
+
+  // 1) 去掉多语言并列，例如：韩国 / 南韓 -> 优先含汉字的项
+  if (text.includes("/")) {
+    let parts = text.split("/").map(t => t.trim()).filter(Boolean);
+    const cn = parts.find(p => /[\u4e00-\u9fa5]/.test(p));
+    text = cn || parts[0] || text;
+  }
+
+  // 2) 合并空白并去首尾
+  text = text.replace(/\s+/g, ' ').trim();
+
+  // 3) 去掉邮编
+  text = text.replace(/\b\d{3,6}\b/g, '').replace(/\b\d{3}-\d{4}\b/g, '');
+
+  // 4) 切分为 token，去重并保留原序
+  const tokens = text.split(/\s+/).filter(Boolean);
+  const uniq = [];
+  for (let t of tokens) if (uniq.indexOf(t) === -1) uniq.push(t);
+
+  // 5) 最多取前三段（国家、州、省/县）
+  let base = uniq.slice(0, 3).join(' ');
+
+  // 6) 如果有 poi，则原样追加（不再额外转换）
+  if (poi) base += `（附近：${poi}）`;
+
+  return base.trim();
+}
+
+async function translateAddressComponents(addrObj, poi) {
+  if (!addrObj || typeof addrObj !== 'object') return '';
+
+  const order = [
+    'country',
+    'state', 'state_district', 'region',
+    'county',
+    'city', 'municipality', 'town', 'suburb', 'village', 'neighbourhood',
+    'road', 'house_number'
+  ];
+
+  let parts = [];
+  const seen = new Set();
+
+  for (let key of order) {
+    let raw = addrObj[key];
+    if (!raw) continue;
+
+    // ---------- ① 基础归一化（保持原文） ----------
+    raw = String(raw);
+
+    // ---------- ② 去掉斜杠并列 ----------
+    raw = raw.split(/[\/;；]/)[0].trim();
+    if (!raw) continue;
+
+    // ---------- ③ 去重 ----------
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+
+    // ---------- ④ 除国家外，英文才需要翻译 ----------
+    let translated = raw;
+    if (key === "country") {
+      try { translated = await ensureTranslatedToZh(raw); } catch (e) { }
+    } else if (/^[\x00-\x7F]+$/.test(raw)) {
+      try { translated = await ensureTranslatedToZh(raw); } catch (e) { }
+    }
+
+    // ---------- ⑤ 翻译结果直接使用（不做繁简转换） ----------
+
+    if (translated) parts.push(translated);
+  }
+
+  // ---------- ⑥ 去重 + 不再 3 级限制 ----------
+  const uniq = [...new Set(parts)];
+
+  return uniq.join(" ");
+}
+
+function fetchWithTimeout(url, opts = {}, timeout = TRANSLATE_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout")), timeout);
+    fetch(url, opts).then(r => {
+      clearTimeout(timer);
+      resolve(r);
+    }).catch(err => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Fetch with retries and timeout. Returns the Response or throws.
+ * attempts: number of attempts (>=1)
+ */
+async function fetchWithRetries(url, opts = {}, attempts = 2, timeout = TRANSLATE_TIMEOUT_MS) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetchWithTimeout(url, opts, timeout);
+      return res;
+    } catch (err) {
+      lastErr = err;
+      // small backoff
+      await new Promise(r => setTimeout(r, 200 * (i + 1)));
+    }
+  }
+  throw lastErr || new Error('fetch failed');
+}
+function createConcurrencyQueue(concurrency = TRANSLATE_CONCURRENCY) {
+  const queue = [];
+  let running = 0;
+
+  function runNext() {
+    if (running >= concurrency || queue.length === 0) return;
+
+    const { fn, resolve, reject } = queue.shift();
+    running++;
+
+    fn().then(res => {
+      running--;
+      resolve(res);
+      runNext();
+    }).catch(err => {
+      running--;
+      reject(err);
+      runNext();
+    });
+  }
+
+  return {
+    push(fn) {
+      return new Promise((resolve, reject) => {
+        queue.push({ fn, resolve, reject });
+        setTimeout(runNext, 0);
+      });
+    }
+  };
+}
+
+async function ensureTranslatedToZh(text) {
+  if (!text) return text;
+
+  // 第一轮：auto 检测
+  const auto = await doTranslateToZh(text, "auto");
+  if (/[\u4e00-\u9fff]/.test(auto)) return auto;
+
+  // 第二轮：强制从英文翻译
+  const en = await doTranslateToZh(text, "en");
+  if (/[\u4e00-\u9fff]/.test(en)) return en;
+
+  // 兜底：原文附加（保持可读）
+  if (auto !== text) return auto;
+  return `${auto}（${text}）`;
+}
+
+async function doTranslateToZh(text, src = 'auto') {
+  if (!text) return text;
+  const key = text + "|" + src;
+  if (_translateCache.has(key)) return _translateCache.get(key);
+
+  const url = "https://translate.googleapis.com/translate_a/single?client=gtx&dt=t"
+    + `&sl=${encodeURIComponent(src)}&tl=zh-CN&q=${encodeURIComponent(text)}`;
+
+  let resText = "";
+  try {
+    const resp = await fetchWithTimeout(url, {}, TRANSLATE_TIMEOUT_MS);
+    resText = await resp.text();
+  } catch (e) {
+    return text; // 网络失败则保留原文
+  }
+
+  if (!resText || resText.startsWith("<")) return text;
+
+  let data;
+  try { data = JSON.parse(resText); }
+  catch { return text; }
+
+  let translated = "";
+  if (Array.isArray(data) && Array.isArray(data[0])) {
+    translated = data[0].map(x => x[0]).join("").trim();
+  } else {
+    translated = String(data || "").trim();
+  }
+
+  _translateCache.set(key, translated);
+  return translated;
+}
+
+
+
+// 外部主函数：接收 OSM 的 display_name 或 address JSON，返回 Promise<简体中文字符串>
+async function translateOsmToZh(osmTextOrObj) {
+  // 如果传入的是对象（nominatim 的 address 或完整 result），优先提取 display_name / name / address fields
+  let raw = "";
+  if (!osmTextOrObj) return "";
+
+  if (typeof osmTextOrObj === "string") {
+    raw = osmTextOrObj;
+  } else if (typeof osmTextOrObj === "object") {
+    // 尝试优先字段
+    raw = osmTextOrObj.display_name || osmTextOrObj.name || osmTextOrObj.address || JSON.stringify(osmTextOrObj);
+  } else {
+    raw = String(osmTextOrObj);
+  }
+
+  const cleaned = cleanOsmText(raw);
+  if (!cleaned) return "";
+
+  if (_translateCache.has(cleaned)) return _translateCache.get(cleaned);
+
+  const translated = await _translateQueue.push(() => doTranslateToZh(cleaned));
+  return translated;
+}
 
 $(function () {
   var map = new BMapGL.Map("map_canvas");
@@ -300,7 +530,6 @@ $(function () {
       // 点击时再聚焦到该点（保留交互），否则不要频繁 centerAndZoom
       map.centerAndZoom(point, 12);
     });
-
     map.addOverlay(marker);
 
     // 收集点，任务完成后统一 setViewport
@@ -324,6 +553,7 @@ $(function () {
     }
 
     timeoutId = setTimeout(() => {
+      console.warn('geoSearch 超时', { index: i, addr: addr, timeoutMs });
       finish(`${addr}：解析超时<br>`, [i, addr, '', '', '解析超时']);
     }, timeoutMs);
 
@@ -336,14 +566,10 @@ $(function () {
         osmSearch(addr);
         return;
       }
-
       const bdLng = point.lng;
       const bdLat = point.lat;
 
-      // Step 2️⃣ 检查是否为国内坐标
       const inChina = Rectangle.isInChina(bdLng, bdLat);
-
-      // Step 3️⃣ 百度逆地理编码校验地址是否可信
       geo.getLocation(point, function (rs) {
         if (!rs || !rs.address) {
           osmSearch(addr);
@@ -384,17 +610,20 @@ $(function () {
     /** 🌍 OSM 搜索逻辑（支持中文 + 自动翻译） */
     function osmSearch(keyword) {
       const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(keyword)}&limit=1&addressdetails=1`;
-      fetch(url, { headers: { 'Accept-Language': 'zh-CN' } })
+      fetchWithRetries(url, { headers: { 'Accept-Language': 'zh-CN' } }, 3, 10000)
         .then(res => res.json())
         .then(data => {
           if (data && data.length > 0) {
             const d = data[0];
             const lat = parseFloat(d.lat).toFixed(6);
             const lng = parseFloat(d.lon).toFixed(6);
-            const addrText = d.display_name;
-            const str = `${addr}：${lat},${lng}（${addrText}）<br>`;
+            // const addrText = d.display_name;
+            // const str = `${addr}：${lat},${lng}（${addrText}）<br>`;
+            // addMarker(lng, lat, i + ":" + str);
+            // finish(str, [i, addr, lat, lng, addrText]);
+            const str = `${addr}：${lat},${lng}<br>`;
             addMarker(lng, lat, i + ":" + str);
-            finish(str, [i, addr, lat, lng, addrText]);
+            finish(str, [i, addr, lat, lng]);
           } else if (isChinese) {
             translateAndSearch(keyword);
           } else {
@@ -412,8 +641,7 @@ $(function () {
       clearTimeout(timeoutId); // 避免翻译时被误判超时
       const api = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=zh-CN&tl=en&dt=t&q=${encodeURIComponent(keyword)}`;
       console.log("🌐 开始翻译：", keyword);
-
-      fetch(api)
+      fetchWithRetries(api, {}, 2, 10000)
         .then(res => res.json())
         .then(json => {
           console.log("✅ 翻译返回：", json);
@@ -433,16 +661,15 @@ $(function () {
     }
   }
 
-  /**
-  * 对经纬度进行逆地理解析（坐标 -> 地址），带超时处理
-  * 自动区分国内/国外调用百度或OSM接口
-  */
-  function geoParse(i, str, done, timeoutMs = 5000) {
+  // =========================================================
+  //  OSM 逆地理 + 清洗 + 翻译为简体中文 的完整 geoParse
+  // =========================================================
+  async function geoParse(i, str, done, timeoutMs = 30000) {
+
     str = str.toString().replace(/\s+/g, "").replace('，', ',').split(',');
     const lat = parseFloat(str[0]);
     const lng = parseFloat(str[1]);
 
-    // 校验输入是否为有效经纬度
     if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) {
       const failText = str.join(',') + ': 解析失败<br>';
       $('#showResults').append(failText);
@@ -454,7 +681,6 @@ $(function () {
     let finished = false;
     let timeoutId;
 
-    // 封装统一的结束逻辑
     function finish(text, data) {
       if (finished) return;
       finished = true;
@@ -464,87 +690,77 @@ $(function () {
       done();
     }
 
-    // 设置超时保护
-    timeoutId = setTimeout(() => {
-      const text = lat + ',' + lng + ': 解析超时';
-      finish(text, [i, lat, lng, "解析超时", ""]);
-    }, timeoutMs);
-
     const lat6 = lat.toFixed(6);
     const lng6 = lng.toFixed(6);
 
-    // 判断是否在中国范围
-    const isChina =
-      lng > 73 && lng < 136 &&
-      lat > 3 && lat < 54;
+    timeoutId = setTimeout(() => {
+      console.warn('geoParse 超时', { index: i, lat: lat6, lng: lng6, timeoutMs });
+      const text = `${lat6},${lng6}：解析超时`;
+      finish(text, [i, lat6, lng6, "解析超时", ""]);
+    }, timeoutMs);
 
-    if (isChina) {
-      // 🇨🇳 国内：使用百度地图逆地理编码
-      const point = new BMapGL.Point(lng, lat);
-      myGeo.getLocation(point, function (rs) {
-        if (rs) {
-          var addr = rs.address || "未知位置";
-          var poi = (rs.surroundingPois && rs.surroundingPois.length > 0) ? ("（附近：" + rs.surroundingPois[0].title + "）") : "";
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat6}&lon=${lng6}&zoom=18&addressdetails=1`;
+    fetchWithRetries(url, { headers: { 'Accept-Language': 'zh-CN' } }, 3, 10000)
+      .then(res => res.json())
+      .then(async data => {
 
-          // 在百度地图上仍用 BD-09 坐标显示（保证显示位置准确）
-          addMarker(lng, lat, (i + 1) + ": " + addr + poi);
-
-          // 输出/导出时：如果位于中国范围，则将 BD09 -> WGS84（否则保持原始坐标）
-          // 国内
-          if (Rectangle.isInChina(lng, lat)) {
-            var wgs = Coordtransform.bd09ToWgs84(lng, lat); // [lng, lat]
-            var wgsLng = wgs[0].toFixed(6);
-            var wgsLat = wgs[1].toFixed(6);
-
-            const text = `${lat6},${lng6}：${addr}${poi}`;
-
-            finish(text, [i, wgsLat, wgsLng, addr + poi, JSON.stringify(rs)]);
-          } else {
-            const text = `${lat6},${lng6}：${addr}${poi}`;
-
-            finish(text, [i, lat6, lng6, addr + poi, JSON.stringify(rs)]);
-          }
-        } else {
-          const text = `${lat6},${lng6}：解析失败`;
-          finish(text, [i, lat6, lng6, "解析失败", ""]);
+        if (!data || !data.address) {
+          const text = `${lat6},${lng6}：国外接口错误`;
+          finish(text, [i, lat6, lng6, "国外接口错误", ""]);
+          return;
         }
-      });
-    } else {
-      // 🌍 国外：使用 OSM Nominatim 接口
-      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat6}&lon=${lng6}&zoom=18&addressdetails=1`;
 
-      fetch(url, {
-        headers: {
-          'Accept-Language': 'zh-CN'
+        const poiName = data.name || "";
+
+        // ① 拼接原始地址（translateAddressComponents 是 async，需要 await）
+        let combined = "";
+        try {
+          combined = await translateAddressComponents(data.address || {}, poiName);
+        } catch (e) {
+          combined = buildAddressForTranslate(data);
         }
+
+        // ② 异步翻译 road 和 POI 字段（修正版）
+        let addrObj = data.address || {};
+        let road = addrObj.road ? cleanOsmText(addrObj.road) : "";
+        let poi = poiName ? cleanOsmText(poiName) : "";
+        let roadZh = road;
+        let poiZh = poi;
+
+        if (road) {
+          // 用 ensureTranslatedToZh 翻译并在有中文时取代
+          const tRoad = await ensureTranslatedToZh(road);
+          if (tRoad && /[\u4e00-\u9fff]/.test(tRoad)) roadZh = tRoad;
+        }
+
+        if (poi) {
+          const tPoi = await ensureTranslatedToZh(poi);
+          if (tPoi && /[\u4e00-\u9fff]/.test(tPoi)) poiZh = tPoi;
+        }
+
+        // ③ 替换 combined 中的 road 和 poi 为翻译结果
+        // 类型保护，确保 combined 为字符串
+        if (typeof combined !== 'string') combined = String(combined || '');
+        let zhText = combined.replace(road, roadZh).replace(poi, poiZh);
+        // 🎯 新增：最终全文翻译 → 中文（自动检测日语）
+        try {
+          zhText = await ensureTranslatedToZh(zhText);
+        } catch (e) { }
+
+        zhText = await cleanTranslatedText(zhText, poiZh);
+
+        addMarker(lng, lat, i + ":" + zhText);
+
+        finish(`${lat6},${lng6}：${zhText}`,
+          [i, lat6, lng6, zhText, JSON.stringify(data)]
+        );
       })
-        .then(res => res.json())
-        .then(data => {
-          if (data && data.address) {
-            const addrParts = [];
-            const a = data.address;
-            if (a.country) addrParts.push(a.country);
-            if (a.state) addrParts.push(a.state);
-            if (a.city || a.town || a.village) addrParts.push(a.city || a.town || a.village);
-            if (a.road || a.suburb) addrParts.push(a.road || a.suburb);
-            const addr = addrParts.join(' ');
-            const poi = data.name ? `（附近：${data.name}）` : "";
-            const text = `${lat6},${lng6}：${addr}${poi}`;
-            addMarker(lng, lat, i + ":" + text);
-            finish(text, [i, lat6, lng6, addr + poi, JSON.stringify(data)]);
-          } else {
-            const text = `${lat6},${lng6}：国外接口错误`;
-            finish(text, [i, lat6, lng6, "国外接口错误", ""]);
-          }
-        })
-        .catch(err => {
-          console.warn("OSM 请求失败", err);
-          const text = `${lat6},${lng6}：解析超时`;
-          finish(text, [i, lat6, lng6, "解析超时", ""]);
-        });
-    }
+      .catch(err => {
+        console.warn("OSM 请求失败", err);
+        const text = `${lat6},${lng6}：解析超时`;
+        finish(text, [i, lat6, lng6, "解析超时", ""]);
+      });
   }
-
 
   $('#clearAddress').on('click', () => $('#addr').val(""));
   $('#clearlnglat').on('click', () => $('#latLng').val(""));
@@ -627,7 +843,6 @@ function exportsCSV(_body, name) {
     navigator.msSaveOrOpenBlob(blob, `${name}.csv`)
   } else {
     var downloadLink = document.createElement('a')
-    // downloadLink.href = uri
     downloadLink.setAttribute('href', URL.createObjectURL(blob)) // 因为url有最大长度限制，encodeURI是会把字符串转化为url，超出限制长度部分数据丢失导致下载失败,为此我采用创建Blob（二进制大对象）的方式来存放缓存数据，具体代码如下：
     downloadLink.download = `${name}.csv`
     document.body.appendChild(downloadLink)
@@ -636,16 +851,4 @@ function exportsCSV(_body, name) {
   }
 }
 
-// 让 Ctrl+A 只选中“解析结果”框内文字
-document.getElementById('showResults').addEventListener('keydown', function (e) {
-  // Ctrl+A
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
-    e.preventDefault(); // 阻止浏览器默认全选页面
-    const sel = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(this); // 选中当前元素内容
-    sel.removeAllRanges();
-    sel.addRange(range);
-  }
-});
 
