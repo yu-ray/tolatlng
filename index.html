@@ -1,46 +1,12 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>经纬度转地名</title>
+    <title>tolatlng</title>
+    <meta http-equiv="refresh" content="0; url=./">
 </head>
-<body>
-    <h1>经纬度转地名</h1>
-    <form id="coordinateForm">
-        <label for="latitude">纬度 (Latitude):</label>
-        <input type="text" id="latitude" name="latitude" required>
-        <br>
-        <label for="longitude">经度 (Longitude):</label>
-        <input type="text" id="longitude" name="longitude" required>
-        <br>
-        <button type="submit">转换</button>
-    </form>
-    <p id="result"></p>
 
-    <script>
-        document.getElementById('coordinateForm').addEventListener('submit', async function(event) {
-            event.preventDefault();
-            const latitude = document.getElementById('latitude').value;
-            const longitude = document.getElementById('longitude').value;
+<body></body>
 
-            if (!latitude || !longitude) {
-                alert('请输入有效的经纬度');
-                return;
-            }
-
-            try {
-                const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`);
-                if (!response.ok) {
-                    throw new Error('无法获取地名信息');
-                }
-                const data = await response.json();
-                const address = data.display_name || '未找到地名';
-                document.getElementById('result').textContent = `地名: ${address}`;
-            } catch (error) {
-                document.getElementById('result').textContent = `错误: ${error.message}`;
-            }
-        });
-    </script>
-</body>
 </html>
