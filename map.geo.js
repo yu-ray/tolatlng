@@ -208,7 +208,7 @@ async function cleanTranslatedText(text, poi) {
   for (let t of tokens) if (uniq.indexOf(t) === -1) uniq.push(t);
 
   // 5) 最多取前三段（国家、州、省/县）
-  let base = uniq.slice(0, 3).join(' ');
+  let base = uniq.slice(0, 6).join(' ');
 
   // 6) 如果有 poi，则原样追加（不再额外转换）
   if (poi) base += `（附近：${poi}）`;
